@@ -128,7 +128,7 @@ All via environment variables, set before sourcing the library:
 | Medium | 105,000 | 30K | Workflow guides, conventions |
 | Low | 175,000 | 50K | Nice-to-have reminders |
 
-No tokenizer needed. Text bytes divided by 3.5 approximates tokens with about 15% accuracy in sub-millisecond time.
+We don't tokenize. Running a tokenizer on every hook invocation would add latency to every tool call, and we don't need exact token counts anyway since we're comparing against thresholds, not computing precise positions. Instead we divide text bytes by 3.5 to approximate tokens. The 3.5 ratio is the conservative (lower) end of the empirically observed 3.5-4.5 bytes-per-token range for English text with code. Using the lower bound means we assume faster attenuation: reinject triggers sooner rather than later, which is the safe direction to err in. The approximation is accurate to about 15% and takes sub-millisecond time.
 
 ## Architecture
 
