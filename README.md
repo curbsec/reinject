@@ -1,33 +1,41 @@
 # reinject
 
-Context rot prevention for Claude Code. Monitors transcript growth and re-injects context when it drifts out of the model's recency zone.
+Context rot prevention for Claude Code hooks.
 
 ## The Problem
 
-Claude Code hooks can inject context at the right moment (e.g., Supabase credentials when you run `supabase` commands). But in long sessions:
+Claude Code has three layers for giving the model instructions:
 
-1. Injected context drifts from the end of context (recency zone) toward the middle (dead zone)
-2. The model's reasoning accuracy degrades for content in the dead zone ([Liu et al., 2023](https://arxiv.org/abs/2307.03172))
-3. Auto-compaction summarizes old content, losing specific injected details
-4. Without re-injection, your hooks become increasingly useless
+1. **CLAUDE.md** — loaded at session start, pinned at the top of context. Benefits from primacy (the model pays attention to what comes first). But as the context window fills with conversation, the signal-to-noise ratio drops. 200 lines of instructions competing with 100K tokens of tool results and code — attention dilutes even at position zero.
+
+2. **Hooks (without reinject)** — fire on specific events (PreToolUse, PostToolUse, etc.) and inject contextual instructions. Unlike CLAUDE.md, they're relevant to what's happening right now. But you have two bad options:
+   - **Inject every time** the hook fires → floods the context with redundant copies. Run 50 commands and you've shoved 50 copies of the same rules in. Burns tokens and accelerates the exact problem you're trying to solve — pushing real conversation into the dead zone faster.
+   - **Inject once** and hope for the best → the injection drifts from the recency zone into the middle of context (the "dead zone," 15-85% of the window). The model's attention is weakest there ([Liu et al., 2023](https://arxiv.org/abs/2307.03172)). Your hook becomes invisible.
+
+3. **Hooks + reinject** — injects only when the math says the model is likely forgetting. Tracks context growth and injection position, re-injects when either threshold is exceeded. No flooding, no drifting.
+
+Reinject solves the positional problem (lost-in-the-middle). It doesn't solve signal dilution — if your context window is 200K tokens deep, even primacy-zone content loses influence. That's a density problem, not a positioning problem.
 
 ## How It Works
 
-**Two components:**
+**Monitor** (`context-monitor.sh`) — fires on every user message and tool result. Parses the JSONL transcript delta since last check, counts bytes of non-thinking and thinking text separately, writes cumulative totals to a status file. That's it — just counting.
 
-1. **Monitor** (`context-monitor.sh`) — auto-registered on `UserPromptSubmit` and `PostToolUse`. Fires on UserPromptSubmit (catches user message + previous turn's tail) and PostToolUse (catches each tool result), so the consumer's view of context growth is always current by the next PreToolUse. Writes cumulative text byte counts to a status file. This is the only component that touches the transcript.
+**Consumer library** (`should-reinject.sh`) — sourced by your hooks. Before a tool runs, your hook calls `should_reinject("my-hook-name")`. The library reads the monitor's byte counts and compares against the counts from the last time *this specific hook* injected. Two triggers:
 
-2. **Consumer library** (`should-reinject.sh`) — sourced by your hooks. Reads the monitor's status file and compares against per-hook injection history. Pure arithmetic — no JSONL parsing.
+- **Growth threshold**: enough new text has accumulated since last injection. Configurable per hook — 52KB for critical rules, 105KB for medium, 175KB for nice-to-have.
+- **Dead zone position**: the last injection landed between 15-85% of total context where attention is weakest.
 
-Both the monitor and consumer library skip when running inside a sub-agent (detected via `agent_id` in hook JSON stdin). Sub-agents are short-lived — tracking their context growth is pointless.
+If either fires → re-inject. If neither → skip.
 
-**No race conditions:** The monitor completes before the next PreToolUse consumer fires, so the status file is always up to date.
+**Compaction reset** — when Claude Code compresses the conversation, all byte counts become meaningless. State is wiped; next relevant tool call triggers a fresh injection.
 
-**Two triggers:**
-- **Absolute growth** (step 3): enough new non-thinking content has accumulated since YOUR last injection
-- **Dead zone detection** (step 4): your injection has drifted to the middle 15-85% of context with enough total context for position to matter
+**Sub-agent skip** — both monitor and consumer detect sub-agents (via `agent_id` in hook input) and exit immediately. Sub-agents are short-lived — tracking their context is pointless.
 
-**Compaction handling:** SessionStart `compact` hook resets all state, so the next relevant tool use triggers a fresh injection.
+**No race conditions** — the monitor completes before the next PreToolUse consumer fires, so the status file is always current.
+
+## In Practice
+
+Your supabase-context hook injects DB connection rules. First tool call → injects. Next 30K tokens of conversation → `should_reinject` returns false, no injection. Then the growth threshold fires → re-injects the rules. They stay fresh without spamming every tool call.
 
 ## Installation
 
@@ -37,7 +45,7 @@ Both the monitor and consumer library skip when running inside a sub-agent (dete
 claude plugins add /path/to/reinject
 ```
 
-This auto-registers the monitor (UserPromptSubmit + PostToolUse) and compaction reset (SessionStart compact). You still write your own consumer hooks.
+Auto-registers the monitor (UserPromptSubmit + PostToolUse) and compaction reset (SessionStart compact). You write your own consumer hooks.
 
 ### Manual installation
 
@@ -93,12 +101,7 @@ if ! should_reinject "my-hook-name"; then
 fi
 
 # Inject your context
-jq -n --arg ctx "Your context here" '{
-  hookSpecificOutput: {
-    hookEventName: "PreToolUse",
-    additionalContext: $ctx
-  }
-}'
+reinject_output "PreToolUse" "Your context here"
 
 # Record that you injected
 reinject_record "my-hook-name"
@@ -111,7 +114,7 @@ All via environment variables (set before sourcing the library):
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `REINJECT_GROWTH_BYTES` | `105000` | Step 3 threshold (non-thinking text bytes) |
+| `REINJECT_GROWTH_BYTES` | `105000` | Growth threshold (non-thinking text bytes) |
 | `REINJECT_RECENCY_THRESHOLD` | `85` | Upper dead zone boundary (%) |
 | `REINJECT_PRIMACY_THRESHOLD` | `15` | Lower dead zone boundary (%) |
 | `REINJECT_MIN_CONTEXT_BYTES` | `21000` | Min context for position check (~6K tokens) |
@@ -125,18 +128,20 @@ All via environment variables (set before sourcing the library):
 | Medium | 105,000 | 30K | Workflow guides, conventions |
 | Low | 175,000 | 50K | Nice-to-have reminders |
 
+No tokenizer needed. Text bytes / 3.5 approximates tokens (~15% accuracy, sub-millisecond).
+
 ## Architecture
 
 ```
 UserPromptSubmit / PostToolUse      PreToolUse (Bash)
-       │                                   │
+       |                                   |
   context-monitor.sh              your-hook.sh (consumer)
-       │                                   │
+       |                                   |
   Parse JSONL delta              source should-reinject.sh
-       │                                   │
+       |                                   |
   Write status file ──────────> Read status file
   (cumulative bytes)            Compare vs own injection history
-       │                                   │
+       |                                   |
   Done (before next             Inject if threshold exceeded
    PreToolUse fires)            Record injection
 ```
@@ -149,6 +154,6 @@ UserPromptSubmit / PostToolUse      PreToolUse (Bash)
 
 ## Docs
 
-- [PLAN.md](docs/PLAN.md) — full architecture
+- [PLAN.md](docs/PLAN.md) — full architecture and design decisions
 - [ASSUMPTIONS.md](docs/ASSUMPTIONS.md) — what we're building on, with confidence levels
 - [RESEARCH.md](docs/RESEARCH.md) — academic research backing the approach
