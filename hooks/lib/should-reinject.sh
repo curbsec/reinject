@@ -33,7 +33,11 @@ REINJECT_RECENCY_THRESHOLD="${REINJECT_RECENCY_THRESHOLD:-85}"
 REINJECT_PRIMACY_THRESHOLD="${REINJECT_PRIMACY_THRESHOLD:-15}"
 REINJECT_MIN_CONTEXT_BYTES="${REINJECT_MIN_CONTEXT_BYTES:-21000}"
 
-_REINJECT_STATE_DIR="${REINJECT_STATE_DIR:-/tmp/claude-reinject-$PPID}"
+# Use session_id from hook input for state isolation (stable across the session).
+# The caller must have done INPUT=$(cat) before sourcing this library.
+# Falls back to $PPID for backwards compat (non-CC callers, older CC versions).
+_reinject_session_id=$(printf '%s' "$INPUT" | jq -r '.session_id // empty' 2>/dev/null)
+_REINJECT_STATE_DIR="${REINJECT_STATE_DIR:-/tmp/claude-reinject-${_reinject_session_id:-$PPID}}"
 _REINJECT_MONITOR_FILE="$_REINJECT_STATE_DIR/monitor-status"
 
 should_reinject() {

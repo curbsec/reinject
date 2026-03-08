@@ -1,25 +1,26 @@
 #!/bin/bash
-# Context monitor — parses JSONL transcript delta on every user prompt.
+# Context meter — parses JSONL transcript delta, tracks cumulative text bytes.
 #
-# Runs on UserPromptSubmit (fires once per user message, before tool calls).
-# Writes cumulative text byte counts to a status file that consumer hooks read.
+# Runs on two hooks:
+#   - UserPromptSubmit: catches user message + previous turn's tail → feeds first PreToolUse
+#   - PostToolUse: catches each tool result → feeds next PreToolUse
 #
 # This is the ONLY hook that touches the JSONL transcript. Consumer hooks
 # just read the status file — pure arithmetic, no parsing.
-#
-# Hook config (auto-registered via hooks.json):
-#   "UserPromptSubmit": [{
-#     "hooks": [{ "type": "command", "command": "/path/to/context-monitor.sh" }]
-#   }]
 
 set -euo pipefail
 
 INPUT=$(cat)
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 JQ_FILTER="$SCRIPT_DIR/../parsers/jq/extract-text-bytes.jq"
-REINJECT_PARSER="${REINJECT_PARSER:-jq}"
+REINJECT_PARSER="${REINJECT_PARSER:-$SCRIPT_DIR/../parsers/rust/reinject-parser}"
+# Fall back to jq if rust binary doesn't exist
+[ -x "$REINJECT_PARSER" ] || REINJECT_PARSER="jq"
 
-STATE_DIR="${REINJECT_STATE_DIR:-/tmp/claude-reinject-$PPID}"
+# Use session_id from hook input for state isolation (stable across the session).
+# Falls back to $PPID for backwards compat (non-CC callers, older CC versions).
+_session_id=$(printf '%s' "$INPUT" | jq -r '.session_id // empty' 2>/dev/null)
+STATE_DIR="${REINJECT_STATE_DIR:-/tmp/claude-reinject-${_session_id:-$PPID}}"
 MONITOR_FILE="$STATE_DIR/monitor-status"
 OFFSET_FILE="$STATE_DIR/monitor-offset"
 
