@@ -15,11 +15,13 @@ Claude Code hooks can inject context at the right moment (e.g., Supabase credent
 
 **Two components:**
 
-1. **Monitor** (`context-monitor.sh`) — auto-registered on `UserPromptSubmit`. Parses the JSONL transcript delta once per user message and writes cumulative text byte counts to a status file. This is the only component that touches the transcript.
+1. **Monitor** (`context-monitor.sh`) — auto-registered on `UserPromptSubmit` and `PostToolUse`. Fires on UserPromptSubmit (catches user message + previous turn's tail) and PostToolUse (catches each tool result), so the consumer's view of context growth is always current by the next PreToolUse. Writes cumulative text byte counts to a status file. This is the only component that touches the transcript.
 
 2. **Consumer library** (`should-reinject.sh`) — sourced by your hooks. Reads the monitor's status file and compares against per-hook injection history. Pure arithmetic — no JSONL parsing.
 
-**No race conditions:** UserPromptSubmit completes before the model generates tool calls, so by the time any PreToolUse consumer fires, the status file is already updated.
+Both the monitor and consumer library skip when running inside a sub-agent (detected via `agent_id` in hook JSON stdin). Sub-agents are short-lived — tracking their context growth is pointless.
+
+**No race conditions:** The monitor completes before the next PreToolUse consumer fires, so the status file is always up to date.
 
 **Two triggers:**
 - **Absolute growth** (step 3): enough new non-thinking content has accumulated since YOUR last injection
@@ -35,7 +37,7 @@ Claude Code hooks can inject context at the right moment (e.g., Supabase credent
 claude plugins add /path/to/reinject
 ```
 
-This auto-registers the monitor (UserPromptSubmit) and compaction reset (SessionStart compact). You still write your own consumer hooks.
+This auto-registers the monitor (UserPromptSubmit + PostToolUse) and compaction reset (SessionStart compact). You still write your own consumer hooks.
 
 ### Manual installation
 
@@ -45,6 +47,12 @@ Copy `hooks/` and `parsers/` somewhere stable, then add to `~/.claude/settings.j
 {
   "hooks": {
     "UserPromptSubmit": [{
+      "hooks": [{
+        "type": "command",
+        "command": "/path/to/hooks/context-monitor.sh"
+      }]
+    }],
+    "PostToolUse": [{
       "hooks": [{
         "type": "command",
         "command": "/path/to/hooks/context-monitor.sh"
@@ -120,7 +128,7 @@ All via environment variables (set before sourcing the library):
 ## Architecture
 
 ```
-UserPromptSubmit                    PreToolUse (Bash)
+UserPromptSubmit / PostToolUse      PreToolUse (Bash)
        │                                   │
   context-monitor.sh              your-hook.sh (consumer)
        │                                   │
@@ -129,8 +137,8 @@ UserPromptSubmit                    PreToolUse (Bash)
   Write status file ──────────> Read status file
   (cumulative bytes)            Compare vs own injection history
        │                                   │
-  Done (before model            Inject if threshold exceeded
-   generates tool calls)        Record injection
+  Done (before next             Inject if threshold exceeded
+   PreToolUse fires)            Record injection
 ```
 
 ## Requirements
