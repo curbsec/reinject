@@ -4,38 +4,38 @@ Context rot prevention for Claude Code hooks.
 
 ## The Problem
 
-Claude Code gives you several ways to instruct the model. Each has a different failure mode as conversations grow:
+Claude Code gives you several ways to instruct the model, each with a different failure mode as conversations grow:
 
-1. **Static instructions** (CLAUDE.md, `.claude/rules/*.md`) — loaded at session start, pinned at the top of context. Benefits from primacy (the model pays attention to what comes first). Survive compaction — Claude Code re-loads them after compressing the conversation. But as the context window fills, the signal-to-noise ratio drops. 200 lines of instructions competing with 100K tokens of tool results and code — attention dilutes even at position zero.
+1. **Static instructions** (CLAUDE.md, `.claude/rules/*.md`) are loaded at session start and pinned at the top of context. They benefit from primacy (the model pays more attention to what comes first) and survive compaction since Claude Code re-loads them after compressing the conversation. The downside is signal dilution: as the context window fills up, 200 lines of instructions have to compete with 100K tokens of tool results and code. Attention dilutes even at position zero.
 
-2. **Hooks (without reinject)** — fire on specific events (PreToolUse, PostToolUse, etc.) and inject contextual instructions. Unlike static files, they're relevant to what's happening right now. But you have two bad options:
-   - **Inject every time** the hook fires → floods the context with redundant copies. Run 50 commands and you've shoved 50 copies of the same rules in. Burns tokens and accelerates the exact problem you're trying to solve — pushing real conversation into the dead zone faster.
-   - **Inject once** and hope for the best → the injection drifts from the recency zone into the middle of context (the "dead zone," 15-85% of the window). The model's attention is weakest there ([Liu et al., 2023](https://arxiv.org/abs/2307.03172)). Your hook becomes invisible. Compaction can also obliterate it entirely — unlike static instructions, hook injections are conversation content and get summarized or dropped.
+2. **Hooks (without reinject)** fire on specific events (PreToolUse, PostToolUse, etc.) and inject contextual instructions. Unlike static files, they're relevant to what's happening right now. But without reinject you have two bad options:
+   - **Inject every time** the hook fires, which floods the context with redundant copies. Run 50 commands and you've shoved 50 copies of the same rules in, burning tokens and accelerating the exact problem you're trying to solve by pushing real conversation into the dead zone faster.
+   - **Inject once** and hope for the best. The injection drifts from the recency zone into the middle of context (the "dead zone," 15-85% of the window), where the model's attention is weakest ([Liu et al., 2023](https://arxiv.org/abs/2307.03172)). Compaction can also obliterate it entirely since, unlike static instructions, hook injections are conversation content and get summarized or dropped.
 
-3. **Hooks + reinject** — injects only when the math says the model is likely forgetting. Tracks context growth and injection position, re-injects when either threshold is exceeded. No flooding, no drifting.
+3. **Hooks + reinject** injects only when the math says the model is likely forgetting. It tracks context growth and injection position, re-injecting when either threshold is exceeded. No flooding, no drifting.
 
-Reinject solves the positional problem (lost-in-the-middle) and handles compaction recovery. It doesn't solve signal dilution — if your context window is 200K tokens deep, even primacy-zone content loses influence. That's a density problem, not a positioning problem.
+Reinject solves the positional problem (lost-in-the-middle) and handles compaction recovery. It doesn't solve signal dilution. If your context window is 200K tokens deep, even primacy-zone content loses influence, and that's a density problem, not a positioning problem.
 
 ## How It Works
 
-**Monitor** (`context-monitor.sh`) — fires on every user message and tool result. Parses the JSONL transcript delta since last check, counts bytes of non-thinking and thinking text separately, writes cumulative totals to a status file. That's it — just counting.
+The **monitor** (`context-monitor.sh`) fires on every user message and tool result. It parses the JSONL transcript delta since the last check, counts bytes of non-thinking and thinking text separately, and writes cumulative totals to a status file. Just counting.
 
-**Consumer library** (`should-reinject.sh`) — sourced by your hooks. Before a tool runs, your hook calls `should_reinject("my-hook-name")`. The library reads the monitor's byte counts and compares against the counts from the last time *this specific hook* injected. Two triggers:
+The **consumer library** (`should-reinject.sh`) is sourced by your hooks. Before a tool runs, your hook calls `should_reinject("my-hook-name")`. The library reads the monitor's byte counts and compares them against the counts from the last time *this specific hook* injected. Two things can trigger a re-injection:
 
-- **Growth threshold**: enough new text has accumulated since last injection. Configurable per hook — 52KB for critical rules, 105KB for medium, 175KB for nice-to-have.
-- **Dead zone position**: the last injection landed between 15-85% of total context where attention is weakest.
+- **Growth threshold**: enough new text has accumulated since last injection. Configurable per hook: 52KB for critical rules, 105KB for medium, 175KB for nice-to-have.
+- **Dead zone position**: the last injection landed between 15-85% of total context, where attention is weakest.
 
-If either fires → re-inject. If neither → skip.
+If either condition is met, reinject. Otherwise skip.
 
-**Compaction reset** — when Claude Code compresses the conversation, all byte counts become meaningless. State is wiped; next relevant tool call triggers a fresh injection.
+**Compaction reset**: when Claude Code compresses the conversation, all byte counts become meaningless. State is wiped and the next relevant tool call triggers a fresh injection.
 
-**Sub-agent skip** — both monitor and consumer detect sub-agents (via `agent_id` in hook input) and exit immediately. Sub-agents are short-lived — tracking their context is pointless.
+**Sub-agent skip**: both monitor and consumer detect sub-agents (via `agent_id` in hook input) and exit immediately. Sub-agents are short-lived and tracking their context growth is pointless.
 
-**No race conditions** — the monitor completes before the next PreToolUse consumer fires, so the status file is always current.
+There are **no race conditions** because the monitor completes before the next PreToolUse consumer fires, so the status file is always current.
 
 ## In Practice
 
-Your supabase-context hook injects DB connection rules. First tool call → injects. Next 30K tokens of conversation → `should_reinject` returns false, no injection. Then the growth threshold fires → re-injects the rules. They stay fresh without spamming every tool call.
+Say your supabase-context hook injects DB connection rules. On the first tool call it injects. Over the next 30K tokens of conversation, `should_reinject` returns false and nothing happens. Then the growth threshold fires and the rules get re-injected. They stay fresh without spamming every tool call.
 
 ## Installation
 
@@ -45,7 +45,7 @@ Your supabase-context hook injects DB connection rules. First tool call → inje
 claude plugins add /path/to/reinject
 ```
 
-Auto-registers the monitor (UserPromptSubmit + PostToolUse) and compaction reset (SessionStart compact). You write your own consumer hooks.
+This auto-registers the monitor (UserPromptSubmit + PostToolUse) and compaction reset (SessionStart compact). You write your own consumer hooks.
 
 ### Manual installation
 
@@ -110,11 +110,11 @@ exit 0
 
 ## Configuration
 
-All via environment variables (set before sourcing the library):
+All via environment variables, set before sourcing the library:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `REINJECT_GROWTH_BYTES` | `105000` | Growth threshold (non-thinking text bytes) |
+| `REINJECT_GROWTH_BYTES` | `105000` | Growth threshold in non-thinking text bytes |
 | `REINJECT_RECENCY_THRESHOLD` | `85` | Upper dead zone boundary (%) |
 | `REINJECT_PRIMACY_THRESHOLD` | `15` | Lower dead zone boundary (%) |
 | `REINJECT_MIN_CONTEXT_BYTES` | `21000` | Min context for position check (~6K tokens) |
@@ -128,7 +128,7 @@ All via environment variables (set before sourcing the library):
 | Medium | 105,000 | 30K | Workflow guides, conventions |
 | Low | 175,000 | 50K | Nice-to-have reminders |
 
-No tokenizer needed. Text bytes / 3.5 approximates tokens (~15% accuracy, sub-millisecond).
+No tokenizer needed. Text bytes divided by 3.5 approximates tokens with about 15% accuracy in sub-millisecond time.
 
 ## Architecture
 
@@ -154,6 +154,6 @@ UserPromptSubmit / PostToolUse      PreToolUse (Bash)
 
 ## Docs
 
-- [PLAN.md](docs/PLAN.md) — full architecture and design decisions
-- [ASSUMPTIONS.md](docs/ASSUMPTIONS.md) — what we're building on, with confidence levels
-- [RESEARCH.md](docs/RESEARCH.md) — academic research backing the approach
+- [PLAN.md](docs/PLAN.md) - full architecture and design decisions
+- [ASSUMPTIONS.md](docs/ASSUMPTIONS.md) - what we're building on, with confidence levels
+- [RESEARCH.md](docs/RESEARCH.md) - academic research backing the approach
