@@ -11,11 +11,12 @@
 #   REINJECT_GROWTH_BYTES=52000  # your threshold (optional)
 #   source "/path/to/should-reinject.sh"
 #   if should_reinject "my-hook-name"; then
-#     # output your additionalContext JSON
+#     reinject_output "PreToolUse" "$MY_CONTEXT"
+#     reinject_record "my-hook-name"
 #   fi
 #
 # The caller MUST capture stdin before sourcing this library.
-# After injection, call reinject_record "my-hook-name" to update state.
+# reinject_output handles both additionalContext and systemMessage.
 #
 # Environment variables (all optional):
 #   REINJECT_GROWTH_BYTES       — step 3 threshold in text bytes (default: 105000 ≈ 30K tokens)
@@ -114,6 +115,32 @@ should_reinject() {
   fi
 
   return 1
+}
+
+# Output the JSON response with additionalContext and systemMessage.
+# Usage: reinject_output "PreToolUse" "$context_string" ["custom message" | ""]
+# Third arg overrides the default systemMessage. Empty string = no systemMessage.
+reinject_output() {
+  local hook_event="$1"
+  local context="$2"
+  local sys_msg="${3-Context refreshed \u2014 key rules were fading}"
+
+  if [ -z "$sys_msg" ]; then
+    jq -n --arg event "$hook_event" --arg ctx "$context" '{
+      hookSpecificOutput: {
+        hookEventName: $event,
+        additionalContext: $ctx
+      }
+    }'
+  else
+    jq -n --arg event "$hook_event" --arg ctx "$context" --arg msg "$sys_msg" '{
+      hookSpecificOutput: {
+        hookEventName: $event,
+        additionalContext: $ctx
+      },
+      systemMessage: $msg
+    }'
+  fi
 }
 
 # Call this AFTER successful injection to record current monitor values
