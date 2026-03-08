@@ -4,17 +4,17 @@ Context rot prevention for Claude Code hooks.
 
 ## The Problem
 
-Claude Code has three layers for giving the model instructions:
+Claude Code gives you several ways to instruct the model. Each has a different failure mode as conversations grow:
 
-1. **CLAUDE.md** — loaded at session start, pinned at the top of context. Benefits from primacy (the model pays attention to what comes first). But as the context window fills with conversation, the signal-to-noise ratio drops. 200 lines of instructions competing with 100K tokens of tool results and code — attention dilutes even at position zero.
+1. **Static instructions** (CLAUDE.md, `.claude/rules/*.md`) — loaded at session start, pinned at the top of context. Benefits from primacy (the model pays attention to what comes first). But as the context window fills, the signal-to-noise ratio drops. 200 lines of instructions competing with 100K tokens of tool results and code — attention dilutes even at position zero. Compaction can also mangle or summarize away specific details.
 
-2. **Hooks (without reinject)** — fire on specific events (PreToolUse, PostToolUse, etc.) and inject contextual instructions. Unlike CLAUDE.md, they're relevant to what's happening right now. But you have two bad options:
+2. **Hooks (without reinject)** — fire on specific events (PreToolUse, PostToolUse, etc.) and inject contextual instructions. Unlike static files, they're relevant to what's happening right now. But you have two bad options:
    - **Inject every time** the hook fires → floods the context with redundant copies. Run 50 commands and you've shoved 50 copies of the same rules in. Burns tokens and accelerates the exact problem you're trying to solve — pushing real conversation into the dead zone faster.
    - **Inject once** and hope for the best → the injection drifts from the recency zone into the middle of context (the "dead zone," 15-85% of the window). The model's attention is weakest there ([Liu et al., 2023](https://arxiv.org/abs/2307.03172)). Your hook becomes invisible.
 
 3. **Hooks + reinject** — injects only when the math says the model is likely forgetting. Tracks context growth and injection position, re-injects when either threshold is exceeded. No flooding, no drifting.
 
-Reinject solves the positional problem (lost-in-the-middle). It doesn't solve signal dilution — if your context window is 200K tokens deep, even primacy-zone content loses influence. That's a density problem, not a positioning problem.
+Reinject solves the positional problem (lost-in-the-middle) and handles compaction recovery. It doesn't solve signal dilution — if your context window is 200K tokens deep, even primacy-zone content loses influence. That's a density problem, not a positioning problem.
 
 ## How It Works
 
