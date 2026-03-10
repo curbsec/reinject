@@ -1,0 +1,3 @@
+[workspace]
+members = ["crates/reinject-core", "crates/reinject-cli", "parsers/rust"]
+resolver = "2"
